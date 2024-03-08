@@ -1,0 +1,5 @@
+cryptography
+pycryptodome
+streamlit
+firebase-admin
+python-dotenv
