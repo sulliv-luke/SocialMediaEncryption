@@ -36,7 +36,7 @@ from cryptography.hazmat.primitives import serialization
 def get_group_member_public_keys(user_id):
     # Fetch all groups where user_id is a member
     groups_ref = db.collection('groups')
-    user_groups = groups_ref.where('admin', '==', user_id).get()
+    user_groups = groups_ref.where('members', 'array_contains', user_id).get()
     print(f"USER GROUPS LENGTH: {len(user_groups)}")
     user_ids = set()
     for group in user_groups:
@@ -117,8 +117,7 @@ def authenticate_user(email, password):
         return user_details
     else:
         return None
-
-    
+ 
 
 def create_group(group_name, admin_id):
     groups_ref = db.collection('groups')
@@ -134,7 +133,7 @@ def create_group(group_name, admin_id):
     _, group_doc_ref = groups_ref.add({  # Unpack the tuple to get the DocumentReference
         'name': group_name,
         'admin': admin_id,
-        'members': []
+        'members': [admin_id]
     })
     return group_doc_ref.id  # Now correctly getting the ID from the DocumentReference
 
@@ -208,6 +207,37 @@ def get_user_posts(user_id):
 
     return user_posts_list
 
+def get_excluded_user_ids(user_id):
+    groups_ref = db.collection('groups')
+    groups = groups_ref.where('members', 'array_contains', user_id).get()
+
+    excluded_user_ids = set([user_id])  # Start with the current user's ID
+    for group in groups:
+        members = group.to_dict().get('members', [])
+        excluded_user_ids.update(members)
+
+    return excluded_user_ids
+
+
+def get_recent_posts(limit=50, exclude_user_ids=None):
+    posts_ref = db.collection('posts')
+    recent_posts_query = posts_ref.order_by('timestamp', direction=firestore.Query.DESCENDING).limit(limit)
+    recent_posts = recent_posts_query.stream()
+
+    posts_list = []
+    for post in recent_posts:
+        post_data = post.to_dict()
+        post_data['post_id'] = post.id
+        
+        # Exclude posts by the current user and their group members
+        if exclude_user_ids and post_data['user_id'] not in exclude_user_ids:
+            posts_list.append(post_data)
+
+    return posts_list
+
+
+
+
 # A function that deletes a specific post
 def delete_post(post_id):
     try:
@@ -260,7 +290,7 @@ def dashboard_page():
                     st.session_state[decrypt_key] = decrypted_text
         
             # Display the encrypted post text in the middle of the container
-            st.write(f"**Encrypted post:** {post['encrypted_text']}")
+            st.write(f"**Encrypted post:** {post['encrypted_text'].decode()}")
 
             # Check if the decrypted text should be displayed
             if decrypt_key in st.session_state and st.session_state[decrypt_key]:
@@ -362,14 +392,41 @@ def my_posts_page(user_id):
     else:
         st.write("You haven't posted anything yet.")
 
+def explore_page(user_id):
+    st.title("Explore Recent Posts")
+
+    # Get user IDs to exclude: the current user and their group members
+    exclude_user_ids = get_excluded_user_ids(user_id)
+
+    # Fetch recent posts excluding those user IDs
+    recent_posts = get_recent_posts(limit=50, exclude_user_ids=exclude_user_ids)
+
+    for post in recent_posts:
+        post_user_details = db.collection('users').document(post['user_id']).get()
+        post_username = post_user_details.to_dict().get('username', 'Unknown user')
+        
+        # Create a container for each post with an outline
+        with st.container():
+            col1, col2 = st.columns([8, 2])
+            with col1:
+                st.markdown(f"**Posted by:** {post_username}")
+            with col2:
+                st.markdown(f"**Post ID:** {post['post_id']}")
+                
+            st.write(f"**Encrypted post:** {post['encrypted_text']}")
+            st.markdown("---")  # Add a horizontal line for visual separation
+
+
 
 def main():
     st.sidebar.title("Navigation")
     if 'current_user' in st.session_state and st.session_state['current_user']:
-        page = st.sidebar.radio("Go to", ("Dashboard", "Group Management", "My Posts", "Logout"))
+        page = st.sidebar.radio("Go to", ("Dashboard", "Group Management", "Explore", "My Posts", "Logout"))
         
         if page == "Dashboard":
             dashboard_page()
+        elif page == "Explore":
+            explore_page(st.session_state['current_user']['uid'])
         elif page == "Group Management":
             group_management_page()
         elif page == "My Posts":
