@@ -3,9 +3,14 @@ import firebase_admin
 from firebase_admin import credentials, auth, firestore
 import datetime
 import requests
-import os                                                                                                                                                                                                          
+import os                         
+import base64                                                                                                                                                                                 
 from dotenv import load_dotenv, find_dotenv
 from pathlib import Path
+from gen_keys import generate_key_pair
+from encrypt_decrypt import encrypt_for_group_members, decrypt_message_with_private_key
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 
 # Initialize Firebase Admin once
 if not firebase_admin._apps:
@@ -26,10 +31,46 @@ hide_streamlit_style = """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True) 
 # =======================
 
+from cryptography.hazmat.primitives import serialization
+
+def get_group_member_public_keys(user_id):
+    # Fetch all groups where user_id is a member
+    groups_ref = db.collection('groups')
+    user_groups = groups_ref.where('admin', '==', user_id).get()
+    print(f"USER GROUPS LENGTH: {len(user_groups)}")
+    user_ids = set()
+    for group in user_groups:
+        members = group.to_dict().get('members', [])
+        user_ids.update(members)
+
+    # Remove the original user_id to avoid encrypting for oneself
+    user_ids.discard(user_id)
+
+    # Fetch public keys for all these users
+    users_ref = db.collection('users')
+    group_public_keys = {}
+    for uid in user_ids:
+        user_doc = users_ref.document(uid).get()
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            public_key_serialized = user_data.get('public key')
+            
+            # Assuming public keys are stored in PEM format
+            public_key = serialization.load_pem_public_key(
+                public_key_serialized.encode(),
+                backend=default_backend()
+            )
+
+            group_public_keys[uid] = public_key
+
+    return group_public_keys
+
 def create_post(user_id, text):
     # Add a new post to the "posts" collection
     posts_ref = db.collection('posts')
-    posts_ref.add({'user_id': user_id, 'text': text, 'timestamp': datetime.datetime.now()})
+    keys = get_group_member_public_keys(st.session_state['current_user']['uid'])
+    encrypted_msg, encrypted_keys = encrypt_for_group_members(keys, text)
+    posts_ref.add({'user_id': user_id, 'encrypted_text': encrypted_msg, 'encrypted_keys': encrypted_keys, 'timestamp': datetime.datetime.now()})
 
 
 # Function to create a new user in Firebase Authentication
@@ -44,10 +85,12 @@ def create_user(email, password):
 # Function to save user details in Firestore
 def save_user_details(user_id, username, email):
     try:
+        public_key_pem = generate_key_pair(user_id)
         doc_ref = db.collection(u'users').document(user_id)
         doc_ref.set({
             u'username': username,
             u'email': email,
+            u'public key': public_key_pem.decode()
         })
         return True
     except Exception as e:
@@ -81,15 +124,19 @@ def create_group(group_name, admin_id):
     groups_ref = db.collection('groups')
     # Check if the group already exists
     existing_group = groups_ref.where('name', '==', group_name).get()
-    if not existing_group:
-        _, group_doc_ref = groups_ref.add({  # Unpack the tuple to get the DocumentReference
-            'name': group_name,
-            'admin': admin_id,
-            'members': [admin_id]
-        })
-        return group_doc_ref.id  # Now correctly getting the ID from the DocumentReference
-    else:
-        return None  # Group already exists
+    if existing_group:
+        return None # Group already exists
+    
+    admin_already_has_group = groups_ref.where('admin', '==', admin_id).get()
+    if admin_already_has_group:
+        return None # Admin already has group
+    
+    _, group_doc_ref = groups_ref.add({  # Unpack the tuple to get the DocumentReference
+        'name': group_name,
+        'admin': admin_id,
+        'members': []
+    })
+    return group_doc_ref.id  # Now correctly getting the ID from the DocumentReference
 
 
 def add_user_to_group(group_name, username_to_add, admin_id):
@@ -137,7 +184,9 @@ def get_group_posts(user_id):
     for uid in user_ids:
         user_posts = posts_ref.where('user_id', '==', uid).order_by('timestamp', direction=firestore.Query.DESCENDING).stream()
         for post in user_posts:
-            posts.append(post.to_dict())
+            post_data = post.to_dict()
+            post_data['post_id'] = post.id  # Include the document ID as 'post_id'
+            posts.append(post_data)
 
     # Optionally, you might want to sort all posts by timestamp here, as they are grouped by user above
     posts.sort(key=lambda x: x['timestamp'], reverse=True)
@@ -189,12 +238,34 @@ def dashboard_page():
             st.success("Posted successfully!")
     
     # Display posts from users the current user follows
-    st.write("### Posts from people you follow")
+    st.write("### Posts from people in your groups")
     posts = get_group_posts(user_id)
     for post in posts:
         post_user_details = db.collection('users').document(post['user_id']).get()
         post_username = post_user_details.to_dict().get('username')
-        st.write(f"{post['text']} (Posted by: {post_username})")
+    
+        # Create a unique key for each post's decryption state
+        decrypt_key = f"decrypt_{post['post_id']}"
+        # Create a container for each post
+        with st.container():
+            # Use columns to layout the "Posted by user" and the decrypt button
+            col1, col2 = st.columns([8, 2])
+            with col1:
+                st.markdown(f"**Posted by:** {post_username}")
+            with col2:
+                # Assuming you have a way to properly decode or handle `post['encrypted_text']`
+                if st.button("Decrypt", key=post['post_id']):
+                    decrypted_text = decrypt_message_with_private_key(post['encrypted_text'].decode(), post['encrypted_keys'][user_id], user_id)
+                    # Output decrypted text in a new container or adjust layout as needed
+                    st.session_state[decrypt_key] = decrypted_text
+        
+            # Display the encrypted post text in the middle of the container
+            st.write(f"**Encrypted post:** {post['encrypted_text']}")
+
+            # Check if the decrypted text should be displayed
+            if decrypt_key in st.session_state and st.session_state[decrypt_key]:
+                st.write(f"**Decrypted post:** {st.session_state[decrypt_key]}")
+
 
 # Function to render the signup form
 def signup_page():
@@ -283,11 +354,11 @@ def my_posts_page(user_id):
     if user_posts:
         for post in user_posts:
             with st.container():
-                st.write(f"{post['text']}")
+                st.write(f"{post['encrypted_text'].decode()}")
                 st.write(f"Posted on: {post['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
                 if st.button("Delete", key=post['post_id']):
                     delete_post(post['post_id'])
-                    st.experimental_rerun()  # Refresh the page to reflect the deletion
+                    st.rerun()  # Refresh the page to reflect the deletion
     else:
         st.write("You haven't posted anything yet.")
 
