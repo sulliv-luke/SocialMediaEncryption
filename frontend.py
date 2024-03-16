@@ -9,6 +9,7 @@ from dotenv import load_dotenv, find_dotenv
 from pathlib import Path
 from gen_keys import generate_key_pair
 from encrypt_decrypt import encrypt_for_group_members, decrypt_message_with_private_key
+from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 
@@ -31,8 +32,6 @@ hide_streamlit_style = """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True) 
 # =======================
 
-from cryptography.hazmat.primitives import serialization
-
 def get_group_member_public_keys(user_id):
     # Fetch all groups where user_id is a member
     groups_ref = db.collection('groups')
@@ -44,26 +43,30 @@ def get_group_member_public_keys(user_id):
         user_ids.update(members)
 
     # Remove the original user_id to avoid encrypting for oneself
-    user_ids.discard(user_id)
+    #user_ids.discard(user_id)
 
-    # Fetch public keys for all these users
+    # Fetch certificates for all these users and extract public keys
     users_ref = db.collection('users')
-    group_public_keys = {}
+    group_member_public_keys = {}
     for uid in user_ids:
         user_doc = users_ref.document(uid).get()
         if user_doc.exists:
             user_data = user_doc.to_dict()
-            public_key_serialized = user_data.get('public key')
-            
-            # Assuming public keys are stored in PEM format
-            public_key = serialization.load_pem_public_key(
-                public_key_serialized.encode(),
+            certificate_pem = user_data.get('certificate')
+
+
+            # Load the X.509 certificate
+            certificate = x509.load_pem_x509_certificate(
+                certificate_pem,
                 backend=default_backend()
             )
 
-            group_public_keys[uid] = public_key
+            # Extract the public key from the certificate
+            public_key = certificate.public_key()
 
-    return group_public_keys
+            group_member_public_keys[uid] = public_key
+
+    return group_member_public_keys
 
 def create_post(user_id, text):
     # Add a new post to the "posts" collection
@@ -85,12 +88,12 @@ def create_user(email, password):
 # Function to save user details in Firestore
 def save_user_details(user_id, username, email):
     try:
-        public_key_pem = generate_key_pair(user_id)
+        certificate = generate_key_pair(user_id)
         doc_ref = db.collection(u'users').document(user_id)
         doc_ref.set({
             u'username': username,
             u'email': email,
-            u'public key': public_key_pem.decode()
+            u'certificate': certificate
         })
         return True
     except Exception as e:
@@ -384,13 +387,38 @@ def my_posts_page(user_id):
     if user_posts:
         for post in user_posts:
             with st.container():
-                st.write(f"{post['encrypted_text'].decode()}")
-                st.write(f"Posted on: {post['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
-                if st.button("Delete", key=post['post_id']):
-                    delete_post(post['post_id'])
-                    st.rerun()  # Refresh the page to reflect the deletion
+                # Generate a unique key for decryption button for each post
+                decrypt_key = f"decrypt_{post['post_id']}"
+                
+                # Display the post's encrypted text
+                st.write(f"**Encrypted Post:** {post['encrypted_text'].decode()}")
+                
+                # Layout for Post Details and Buttons
+                col1, col2, col3 = st.columns([6,3,3])
+                
+                with col1:
+                    # Display the timestamp for each post
+                    st.write(f"Posted on: {post['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                with col2:
+                    # Button for decrypting the post
+                    if st.button("Decrypt", key=f"{post['post_id']}_decrypt"):
+                        # Assuming the decrypt_message_with_private_key function and necessary keys are available
+                        decrypted_text = decrypt_message_with_private_key(post['encrypted_text'].decode(), post['encrypted_keys'][user_id], user_id)
+                        st.session_state[decrypt_key] = decrypted_text
+                
+                with col3:
+                    # Button for deleting the post
+                    if st.button("Delete", key=post['post_id']):
+                        delete_post(post['post_id'])
+                        st.experimental_rerun()  # Refresh the page to reflect the deletion
+                
+                # Check if the post has been decrypted and display it
+                if decrypt_key in st.session_state and st.session_state[decrypt_key]:
+                    st.write(f"**Decrypted Post:** {st.session_state[decrypt_key]}")
     else:
         st.write("You haven't posted anything yet.")
+
 
 def explore_page(user_id):
     st.title("Explore Recent Posts")
