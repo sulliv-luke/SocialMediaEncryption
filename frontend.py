@@ -1,25 +1,8 @@
-import streamlit as st
-import firebase_admin
-from firebase_admin import credentials, auth, firestore
-import datetime
-import requests
-import os                         
-import base64                                                                                                                                                                                 
-from dotenv import load_dotenv, find_dotenv
-from pathlib import Path
-from gen_keys import generate_key_pair
-from encrypt_decrypt import encrypt_for_group_members, decrypt_message_with_private_key
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.backends import default_backend
-
-# Initialize Firebase Admin once
-if not firebase_admin._apps:
-    cred = credentials.Certificate('firebase-admin.json')
-    default_app = firebase_admin.initialize_app(cred)
-
-# Firestore database
-db = firestore.client()
+import streamlit as st                                                                                                                                                                        
+from encrypt_decrypt import decrypt_message_with_private_key
+from firebase_admin_utils import authenticate_user, db, create_user, save_user_details
+from group_utils import create_group, add_user_to_group, remove_user_from_group, get_group_posts
+from post_utils import create_post, delete_post, get_excluded_user_ids, get_user_posts, get_recent_posts
 
 # Remove menu and footer
 # =======================
@@ -31,223 +14,6 @@ hide_streamlit_style = """
             """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True) 
 # =======================
-
-def get_group_member_public_keys(user_id):
-    # Fetch all groups where user_id is a member
-    groups_ref = db.collection('groups')
-    user_groups = groups_ref.where('members', 'array_contains', user_id).get()
-    print(f"USER GROUPS LENGTH: {len(user_groups)}")
-    user_ids = set()
-    for group in user_groups:
-        members = group.to_dict().get('members', [])
-        user_ids.update(members)
-
-    # Remove the original user_id to avoid encrypting for oneself
-    #user_ids.discard(user_id)
-
-    # Fetch certificates for all these users and extract public keys
-    users_ref = db.collection('users')
-    group_member_public_keys = {}
-    for uid in user_ids:
-        user_doc = users_ref.document(uid).get()
-        if user_doc.exists:
-            user_data = user_doc.to_dict()
-            certificate_pem = user_data.get('certificate')
-
-
-            # Load the X.509 certificate
-            certificate = x509.load_pem_x509_certificate(
-                certificate_pem,
-                backend=default_backend()
-            )
-
-            # Extract the public key from the certificate
-            public_key = certificate.public_key()
-
-            group_member_public_keys[uid] = public_key
-
-    return group_member_public_keys
-
-def create_post(user_id, text):
-    # Add a new post to the "posts" collection
-    posts_ref = db.collection('posts')
-    keys = get_group_member_public_keys(st.session_state['current_user']['uid'])
-    encrypted_msg, encrypted_keys = encrypt_for_group_members(keys, text)
-    posts_ref.add({'user_id': user_id, 'encrypted_text': encrypted_msg, 'encrypted_keys': encrypted_keys, 'timestamp': datetime.datetime.now()})
-
-
-# Function to create a new user in Firebase Authentication
-def create_user(email, password):
-    try:
-        user = auth.create_user(email=email, password=password)
-        return user
-    except Exception as e:
-        st.error(f"Error creating user: {str(e)}")
-        return None
-    
-# Function to save user details in Firestore
-def save_user_details(user_id, username, email):
-    try:
-        certificate = generate_key_pair(user_id)
-        doc_ref = db.collection(u'users').document(user_id)
-        doc_ref.set({
-            u'username': username,
-            u'email': email,
-            u'certificate': certificate
-        })
-        return True
-    except Exception as e:
-        st.error(f"Error saving user details: {str(e)}")
-        return False
-    
-
-def authenticate_user(email, password):
-    load_dotenv()
-    api_key = os.getenv("FIREBASE_KEY")
-    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={api_key}"
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "email": email,
-        "password": password,
-        "returnSecureToken": True
-    }
-    
-    response = requests.post(url, headers=headers, json=data)
-    
-    if response.status_code == 200:
-        user_details = response.json()
-        # user_details now contains user info, including a token you can use to make authenticated requests
-        return user_details
-    else:
-        return None
- 
-
-def create_group(group_name, admin_id):
-    groups_ref = db.collection('groups')
-    # Check if the group already exists
-    existing_group = groups_ref.where('name', '==', group_name).get()
-    if existing_group:
-        return None # Group already exists
-    
-    admin_already_has_group = groups_ref.where('admin', '==', admin_id).get()
-    if admin_already_has_group:
-        return None # Admin already has group
-    
-    _, group_doc_ref = groups_ref.add({  # Unpack the tuple to get the DocumentReference
-        'name': group_name,
-        'admin': admin_id,
-        'members': [admin_id]
-    })
-    return group_doc_ref.id  # Now correctly getting the ID from the DocumentReference
-
-
-def add_user_to_group(group_name, username_to_add, admin_id):
-    # Find the user ID of the user to add
-    users_ref = db.collection('users')
-    user_docs = users_ref.where('username', '==', username_to_add).get()
-    if not user_docs:
-        return "User not found"
-    
-    user_to_add_id = user_docs[0].id
-    
-    # Find the group and add the user to it
-    groups_ref = db.collection('groups')
-    group_doc = groups_ref.where('name', '==', group_name).where('admin', '==', admin_id).get()
-    
-    if not group_doc:
-        return "Group not found or you're not the admin"
-    
-    group = group_doc[0]
-    if user_to_add_id in group.to_dict()['members']:
-        return "User already in the group"
-    
-    groups_ref.document(group.id).update({
-        'members': firestore.ArrayUnion([user_to_add_id])
-    })
-    return "User added successfully"
-
-def get_group_posts(user_id):
-    # Step 1: Find all groups where the current user is a member
-    groups_ref = db.collection('groups')
-    groups = groups_ref.where('members', 'array_contains', user_id).get()
-
-    # Step 2: Collect unique user IDs from these groups
-    user_ids = set()
-    for group in groups:
-        members = group.to_dict().get('members', [])
-        user_ids.update(members)
-
-    # Optionally remove the current user's ID from the set if you don't want to see your own posts
-    user_ids.discard(user_id)
-
-    # Step 3: Fetch posts made by these users
-    posts_ref = db.collection('posts')
-    posts = []
-    for uid in user_ids:
-        user_posts = posts_ref.where('user_id', '==', uid).order_by('timestamp', direction=firestore.Query.DESCENDING).stream()
-        for post in user_posts:
-            post_data = post.to_dict()
-            post_data['post_id'] = post.id  # Include the document ID as 'post_id'
-            posts.append(post_data)
-
-    # Optionally, you might want to sort all posts by timestamp here, as they are grouped by user above
-    posts.sort(key=lambda x: x['timestamp'], reverse=True)
-
-    return posts
-
-
-# A function that gets all posts from a specific user
-def get_user_posts(user_id):
-    posts_ref = db.collection('posts')
-    user_posts_query = posts_ref.where('user_id', '==', user_id).order_by('timestamp', direction=firestore.Query.DESCENDING)
-    user_posts = user_posts_query.stream()
-
-    user_posts_list = []
-    for post in user_posts:
-        post_data = post.to_dict()
-        post_data['post_id'] = post.id  # Store Firestore document ID to identify the post for deletion
-        user_posts_list.append(post_data)
-
-    return user_posts_list
-
-def get_excluded_user_ids(user_id):
-    groups_ref = db.collection('groups')
-    groups = groups_ref.where('members', 'array_contains', user_id).get()
-
-    excluded_user_ids = set([user_id])  # Start with the current user's ID
-    for group in groups:
-        members = group.to_dict().get('members', [])
-        excluded_user_ids.update(members)
-
-    return excluded_user_ids
-
-
-def get_recent_posts(limit=50, exclude_user_ids=None):
-    posts_ref = db.collection('posts')
-    recent_posts_query = posts_ref.order_by('timestamp', direction=firestore.Query.DESCENDING).limit(limit)
-    recent_posts = recent_posts_query.stream()
-
-    posts_list = []
-    for post in recent_posts:
-        post_data = post.to_dict()
-        post_data['post_id'] = post.id
-        
-        # Exclude posts by the current user and their group members
-        if exclude_user_ids and post_data['user_id'] not in exclude_user_ids:
-            posts_list.append(post_data)
-
-    return posts_list
-
-
-
-
-# A function that deletes a specific post
-def delete_post(post_id):
-    try:
-        db.collection('posts').document(post_id).delete()
-        st.success("Post deleted successfully.")
-    except Exception as e:
-        st.error(f"An error occurred while deleting the post: {e}")
 
 
     
@@ -285,6 +51,7 @@ def dashboard_page():
             col1, col2 = st.columns([8, 2])
             with col1:
                 st.markdown(f"**Posted by:** {post_username}")
+                st.write(f"Posted at: {post['timestamp']}")
             with col2:
                 # Assuming you have a way to properly decode or handle `post['encrypted_text']`
                 if st.button("Decrypt", key=post['post_id']):
@@ -298,6 +65,8 @@ def dashboard_page():
             # Check if the decrypted text should be displayed
             if decrypt_key in st.session_state and st.session_state[decrypt_key]:
                 st.write(f"**Decrypted post:** {st.session_state[decrypt_key]}")
+
+            st.markdown("---")  # Add a horizontal line for visual separation
 
 
 # Function to render the signup form
@@ -354,7 +123,6 @@ def login_page():
                 st.error("Login Failed. Please check your email and password.")
 
 
-
 def group_management_page():
     st.title("Group Management")
     
@@ -378,6 +146,15 @@ def group_management_page():
             result = add_user_to_group(group_name, username_to_add, st.session_state['current_user']['uid'])
             st.success(result)  # Display the result of the attempt to add a user
 
+    with st.form("remove_user_from_group"):
+        group_name_remove = st.text_input("Enter group name to remove user from", key="group_name_remove")
+        username_to_remove = st.text_input("Enter username of user to remove from group", key="username_to_remove")
+        remove_user_button = st.form_submit_button("Remove User from Group")
+        
+        if remove_user_button and group_name_remove and username_to_remove:
+            result = remove_user_from_group(group_name_remove, username_to_remove, st.session_state['current_user']['uid'])
+            st.success(result)  # Display the result of the attempt to remove a user
+
 
 def my_posts_page(user_id):
     st.title("My Posts")
@@ -398,7 +175,7 @@ def my_posts_page(user_id):
                 
                 with col1:
                     # Display the timestamp for each post
-                    st.write(f"Posted on: {post['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
+                    st.write(f"Posted at: {post['timestamp']}")
                 
                 with col2:
                     # Button for decrypting the post
@@ -416,6 +193,8 @@ def my_posts_page(user_id):
                 # Check if the post has been decrypted and display it
                 if decrypt_key in st.session_state and st.session_state[decrypt_key]:
                     st.write(f"**Decrypted Post:** {st.session_state[decrypt_key]}")
+
+                st.markdown("---")  # Add a horizontal line for visual separation
     else:
         st.write("You haven't posted anything yet.")
 
@@ -435,13 +214,12 @@ def explore_page(user_id):
         
         # Create a container for each post with an outline
         with st.container():
-            col1, col2 = st.columns([8, 2])
+            col1, col2 = st.columns([8, 1])
             with col1:
                 st.markdown(f"**Posted by:** {post_username}")
-            with col2:
-                st.markdown(f"**Post ID:** {post['post_id']}")
+                st.markdown(f"**Posted at:** {post['timestamp']}")
                 
-            st.write(f"**Encrypted post:** {post['encrypted_text']}")
+            st.write(f"**Encrypted post:** {post['encrypted_text'].decode()}")
             st.markdown("---")  # Add a horizontal line for visual separation
 
 
