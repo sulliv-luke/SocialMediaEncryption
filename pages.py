@@ -4,19 +4,6 @@ from firebase_admin_utils import authenticate_user, db, create_user, save_user_d
 from group_utils import create_group, add_user_to_group, remove_user_from_group, get_group_posts
 from post_utils import create_post, delete_post, get_excluded_user_ids, get_user_posts, get_recent_posts
 
-# Remove menu and footer
-# =======================
-hide_streamlit_style = """
-            <style>
-            #MainMenu {visibility: hidden;}
-            footer {visibility: hidden;}
-            </style>
-            """
-st.markdown(hide_streamlit_style, unsafe_allow_html=True) 
-# =======================
-
-
-    
 def dashboard_page():
     # Ensure the user is logged in
     if 'current_user' not in st.session_state or not st.session_state['current_user']:
@@ -221,31 +208,3 @@ def explore_page(user_id):
                 
             st.write(f"**Encrypted post:** {post['encrypted_text'].decode()}")
             st.markdown("---")  # Add a horizontal line for visual separation
-
-
-
-def main():
-    st.sidebar.title("Navigation")
-    if 'current_user' in st.session_state and st.session_state['current_user']:
-        page = st.sidebar.radio("Go to", ("Dashboard", "Group Management", "Explore", "My Posts", "Logout"))
-        
-        if page == "Dashboard":
-            dashboard_page()
-        elif page == "Explore":
-            explore_page(st.session_state['current_user']['uid'])
-        elif page == "Group Management":
-            group_management_page()
-        elif page == "My Posts":
-            my_posts_page(st.session_state['current_user']['uid'])
-        elif page == "Logout":
-            del st.session_state['current_user']
-            st.experimental_rerun()
-    else:
-        page = st.sidebar.radio("Go to", ("Login", "Sign Up"))
-        if page == "Login":
-            login_page()
-        elif page == "Sign Up":
-            signup_page()
-
-if __name__ == "__main__":
-    main()
