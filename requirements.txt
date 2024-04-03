@@ -3,5 +3,3 @@ pycryptodome
 streamlit
 firebase-admin
 python-dotenv
-
-gAAAAABl-ZlMHOeovTpiOgR7KsHzfOgxlGjGjAKQU9Gq74exiT-aUnXTHW_BrLyvWzly8-MAiz8wn8WFIXPUsPZ2kvTE_mUScQ==
