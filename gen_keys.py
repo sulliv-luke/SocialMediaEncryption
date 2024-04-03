@@ -15,10 +15,10 @@ def generate_key_pair(name):
 
     # Create a self-signed certificate
     subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
-        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"California"),
-        x509.NameAttribute(NameOID.LOCALITY_NAME, u"San Francisco"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"My Company"),
+        x509.NameAttribute(NameOID.COUNTRY_NAME, u"IE"),
+        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"Leinster"),
+        x509.NameAttribute(NameOID.LOCALITY_NAME, u"Dublin"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Trinity College Dublin"),
         x509.NameAttribute(NameOID.COMMON_NAME, name),
     ])
 
@@ -54,15 +54,15 @@ def generate_key_pair(name):
         ))
 
     # Serialize public key
-    with open('keys/' + name + '_public_key.pem', 'wb') as f:
-        f.write(public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        ))
+    #with open('keys/' + name + '_public_key.pem', 'wb') as f:
+        #f.write(public_key.public_bytes(
+            #encoding=serialization.Encoding.PEM,
+            #format=serialization.PublicFormat.SubjectPublicKeyInfo
+        #))
 
     # Serialize certificate
     cert_pem = certificate.public_bytes(serialization.Encoding.PEM)
-    with open('keys/' + name + '_certificate.pem', 'wb') as f:
-        f.write(cert_pem)
+    #with open('keys/' + name + '_certificate.pem', 'wb') as f:
+        #f.write(cert_pem)
 
     return cert_pem
